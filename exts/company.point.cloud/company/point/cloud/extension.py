@@ -59,6 +59,7 @@ class CompanyPointCloudExtension(omni.ext.IExt):
         """
         Create a grid system centered at (0, 0, 0) with an area of 1500 x 1500 meters.
         Add multiple points to a cell based on a gas concentration value.
+        Uses LOD (Level of Detail) based on camera distance.
         """
         if self._first_poll:
             self.remove_points(self._last_x, self._last_z, self._last_num_points)
@@ -69,25 +70,49 @@ class CompanyPointCloudExtension(omni.ext.IExt):
         world_size_x = 1500  # meters
         world_size_z = 1500  # meters
         cell_size = 10       # meters
-        half_world_x = world_size_x / 2  # The world spans from -750 to +750 meters along X.
-        half_world_z = world_size_z / 2  # The world spans from -750 to +750 meters along Z.
+        half_world_x = world_size_x / 2
+        half_world_z = world_size_z / 2
 
-        # Convert world coordinates (x, z) to cell coordinates (i, j)
-        i = int((float(x) + half_world_x) / cell_size) - int(world_size_x / (2 * cell_size))
-        j = int((float(z) + half_world_z) / cell_size) - int(world_size_z / (2 * cell_size))
+        # Convert world coordinates (x, z) to grid cell (i, j)
+        i = int((x + half_world_x) / cell_size) - int(world_size_x / (2 * cell_size))
+        j = int((z + half_world_z) / cell_size) - int(world_size_z / (2 * cell_size))
 
         # Validate cell coordinates
         if i is None or j is None:
-            raise ValueError("World coordinates (x, z) must be provided for 'place_point' action.")
+            raise ValueError("World coordinates (x, z) must be provided.")
 
         # Get the current USD stage
         stage = omni.usd.get_context().get_stage()
         if not stage:
             raise RuntimeError("Failed to get the current USD stage.")
 
-        # Calculate the number of points based on gas concentration
-        num_points = int(gas_concentration * 100)  # Example: 3.89 → 389 points
-        logging.warning(f"Adding {num_points} points to cell ({i}, {j})")
+        # Get camera transform
+        camera_path = "/OmniverseKit_Persp"  # Default for Omniverse Kit
+        camera = UsdGeom.Camera.Get(stage, camera_path)
+        if not camera:
+            raise RuntimeError("Camera not found in USD stage.")
+
+        time = Usd.TimeCode.Default()
+        cam_transform = camera.ComputeLocalToWorldTransform(time)
+        cam_position = Gf.Vec3f(cam_transform.ExtractTranslation())  # Convert to Vec3f
+
+        # Compute distance from camera to the grid cell
+        cell_center = Gf.Vec3f(x, 0, z)
+        distance = (cam_position - cell_center).GetLength()
+
+        # Determine LOD factor based on distance for performance optimization
+        if distance < 200:
+            lod_factor = 1.0  # Full detail (100% points)
+        elif distance < 500:
+            lod_factor = 0.5  # Medium detail (50% points)
+        else:
+            lod_factor = 0.1  # Low detail (10% points)
+
+        # Calculate number of points based on gas concentration and LOD factor
+        num_points = int(gas_concentration * 1000 * lod_factor)
+        num_points = max(1, num_points)  # At least one point
+
+        logging.warning(f"Adding {num_points} points to cell ({i}, {j}) where LOD is {lod_factor}")
 
         # Define the bounds of the cell
         cell_min_x = x - (cell_size / 2)
@@ -97,43 +122,39 @@ class CompanyPointCloudExtension(omni.ext.IExt):
 
         # Add points to the cell
         for point_index in range(num_points):
-            # Generate random coordinates within the cell
             point_x = random.uniform(cell_min_x, cell_max_x)
             point_z = random.uniform(cell_min_z, cell_max_z)
 
-            # Define a point at the random coordinates
             point_path = f"/World/Point_{i}_{j}_{point_index}"
             point = UsdGeom.Sphere.Define(stage, point_path)
             if not point:
                 raise RuntimeError(f"Failed to create point at path: {point_path}")
 
-            # Set the radius of the point
-            point.CreateRadiusAttr(0.1)  # Smaller radius for multiple points
+            point.CreateRadiusAttr(0.1)  # Small point size
 
-            # Check if the point already has a translate operation
+            # Set position using an existing translate operation
             xformable = UsdGeom.Xformable(point)
             translate_op = None
             for op in xformable.GetOrderedXformOps():
                 if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
                     translate_op = op
                     break
-
-            # If no translate operation exists, add one
             if translate_op is None:
                 translate_op = xformable.AddTranslateOp()
 
-            # Set the position using random coordinates
             translate_op.Set(Gf.Vec3f(point_x, 0, point_z))
 
-            # Add color to the point (RGB values in the range [0, 1])
+            # Set point color (white for now)
             color = Gf.Vec3f(1.0, 1.0, 1.0)
             point.CreateDisplayColorAttr(Vt.Vec3fArray([color]))
 
-        logging.warning(f"Added {num_points} points to cell ({i}, {j})")
+        logging.warning(f"Added {num_points} points to cell ({i}, {j}) at distance {distance:.2f}m")
         self._last_x = i
         self._last_z = j
         self._last_num_points = num_points
         return i, j
+
+
 
     def remove_points(self, x, z, num_points=380):
         """ Remove points from the USD stage that were created by the grid_manager function. """
