@@ -24,7 +24,8 @@ class CompanyPointCloudExtension(omni.ext.IExt):
         self._last_z = 0
         self._last_num_points = 0
         self._update_timer = 0  # Timer for controlling update frequency
-        self._update_interval = 10.0  # Update every 10 seconds
+        self._update_interval = 1  # Update every 10 seconds
+        self._active_point_cells = set()  # Track (i, j) of active grid cells
 
         with self._window.frame:
             with ui.VStack():
@@ -61,14 +62,12 @@ class CompanyPointCloudExtension(omni.ext.IExt):
         Add multiple points to a cell based on a gas concentration value.
         Uses LOD (Level of Detail) based on camera distance.
         """
-        if self._first_poll:
-            self.remove_points(self._last_x, self._last_z, self._last_num_points)
-            logging.warning(f"Remove points called with {self._last_x}, {self._last_z}, {self._last_num_points}")
-        self._first_poll = 1    
+
+
 
         # Grid parameters
-        world_size_x = 1500  # meters
-        world_size_z = 1500  # meters
+        world_size_x = 150  # meters
+        world_size_z = 150  # meters
         cell_size = 10       # meters
         half_world_x = world_size_x / 2
         half_world_z = world_size_z / 2
@@ -97,22 +96,22 @@ class CompanyPointCloudExtension(omni.ext.IExt):
         cam_position = Gf.Vec3f(cam_transform.ExtractTranslation())  # Convert to Vec3f
 
         # Compute distance from camera to the grid cell
-        cell_center = Gf.Vec3f(x, 0, z)
+        cell_center = Gf.Vec3f(x, 100, z)
         distance = (cam_position - cell_center).GetLength()
 
         # Determine LOD factor based on distance for performance optimization
-        if distance < 200:
+        if distance < 100:
             lod_factor = 1.0  # Full detail (100% points)
-        elif distance < 500:
+        elif distance < 300:
             lod_factor = 0.5  # Medium detail (50% points)
         else:
             lod_factor = 0.1  # Low detail (10% points)
 
         # Calculate number of points based on gas concentration and LOD factor
-        num_points = int(gas_concentration * 1000 * lod_factor)
+        num_points = int(gas_concentration * 50 * lod_factor)
         num_points = max(1, num_points)  # At least one point
 
-        logging.warning(f"Adding {num_points} points to cell ({i}, {j}) where LOD is {lod_factor}")
+        #logging.warning(f"Adding {num_points} points to cell ({i}, {j}) where LOD is {lod_factor}")
 
         # Define the bounds of the cell
         cell_min_x = x - (cell_size / 2)
@@ -145,44 +144,48 @@ class CompanyPointCloudExtension(omni.ext.IExt):
             translate_op.Set(Gf.Vec3f(point_x, 0, point_z))
 
             # Set point color (white for now)
-            color = Gf.Vec3f(1.0, 1.0, 1.0)
+            color = self.concentration_to_color(gas_concentration)
             point.CreateDisplayColorAttr(Vt.Vec3fArray([color]))
+            self._active_point_cells.add((i, j))
 
-        logging.warning(f"Added {num_points} points to cell ({i}, {j}) at distance {distance:.2f}m")
-        self._last_x = i
-        self._last_z = j
-        self._last_num_points = num_points
         return i, j
 
 
+    def concentration_to_color(self, conc, max_conc=1.0):
+        """ Maps concentration (0 to max_conc) to RGB color. """
+        norm = min(conc / max_conc, 1.0)
 
-    def remove_points(self, x, z, num_points=380):
-        """ Remove points from the USD stage that were created by the grid_manager function. """
-        # Get the current USD stage
+        if norm < 0.5:
+            # Blue → Green
+            t = norm / 0.5
+            return Gf.Vec3f(0.0, t, 1.0 - t)
+        else:
+            # Green → Red
+            t = (norm - 0.5) / 0.5
+            return Gf.Vec3f(t, 1.0 - t, 0.0)
+    
+    def remove_all_point_clouds(self):
         stage = omni.usd.get_context().get_stage()
         if not stage:
-            raise RuntimeError("Failed to get the current USD stage.")
+            return
 
-        # Iterate through the points and remove them
-        for point_index in range(num_points):
-            # Path of the point
-            point_path = f"/World/Point_{x}_{z}_{point_index}"
+        for (i, j) in self._active_point_cells:
+            for point_index in range(200):
+                point_path = f"/World/Point_{i}_{j}_{point_index}"
+                prim = stage.GetPrimAtPath(point_path)
+                if prim and prim.IsValid():
+                    stage.RemovePrim(point_path)
 
-            # Check if the point exists
-            point_prim = stage.GetPrimAtPath(point_path)
-            if point_prim.IsValid():
-                # Remove the point
-                stage.RemovePrim(point_path)
-                logging.warning(f"Point at path {point_path} removed.")
-            else:
-                logging.warning(f"Point at path {point_path} does not exist.")
+        #logging.warning(f"Removed {len(self._active_point_cells)} cells' points")
+        self._active_point_cells.clear()
 
-        print(f"Removed {num_points} points from cell ({x}, {z})")
 
     def load_netcdf_point_cloud(self):
         """ Load data from NetCDF file using netCDF4 and process all lat/lon dimensions. """
-        file_path = f"C:/Users/ov-user/Documents/output_concentrations_{self._current_file_index:02d}.nc"
-        logging.warning(file_path)
+        file_path = f"C:/Users/pcomp/Documents/thesis-flexpart2025-main/output_concentrations_{self._current_file_index:02d}.nc"
+        #logging.warning(file_path)
+        self.remove_all_point_clouds()  # 🧹 Clear previous points
+
 
         try:
             # Open the NetCDF file
